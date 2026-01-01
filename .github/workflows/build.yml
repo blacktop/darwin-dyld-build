@@ -24,6 +24,10 @@ on:
 env:
   MACOS: "26.1"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: macos-latest

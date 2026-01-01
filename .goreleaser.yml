@@ -12,19 +12,17 @@ checksum:
   extra_files:
     - glob: dyld-tools-universal.tar.gz
 
-brews:
+homebrew_casks:
   - name: dyld-tools
     repository:
       owner: blacktop
       name: homebrew-tap
       branch: master
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
-    directory: Formula
+    directory: Casks
     homepage: "https://github.com/blacktop/darwin-dyld-build"
     description: "Apple dyld tools built for macOS"
-    license: "APSL-2.0"
-    install: |
-      bin.install "dyld_info"
-      bin.install "dyld_shared_cache_util"
-    test: |
-      system "#{bin}/dyld_info", "--help"
+    url_template: "https://github.com/blacktop/darwin-dyld-build/releases/download/{{ .Tag }}/dyld-tools-universal.tar.gz"
+    artifacts:
+      - "dyld_info"
+      - "dyld_shared_cache_util"

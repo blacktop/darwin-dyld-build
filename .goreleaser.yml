@@ -1,0 +1,30 @@
+version: 2
+
+builds:
+  - skip: true
+
+release:
+  extra_files:
+    - glob: dyld-tools-universal.tar.gz
+
+checksum:
+  name_template: "checksums.txt"
+  extra_files:
+    - glob: dyld-tools-universal.tar.gz
+
+brews:
+  - name: dyld-tools
+    repository:
+      owner: blacktop
+      name: homebrew-tap
+      branch: master
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/blacktop/darwin-dyld-build"
+    description: "Apple dyld tools built for macOS"
+    license: "APSL-2.0"
+    install: |
+      bin.install "dyld_info"
+      bin.install "dyld_shared_cache_util"
+    test: |
+      system "#{bin}/dyld_info", "--help"

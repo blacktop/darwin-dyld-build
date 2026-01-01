@@ -23,3 +23,7 @@ DerivedData/
 # Temporary files
 *.tmp
 *.log
+
+# Release artifacts
+*.tar.gz
+checksums.txt

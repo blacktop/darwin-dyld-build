@@ -104,6 +104,7 @@ jobs:
           formula-name: dyld-tools
           formula-path: Formula/dyld-tools.rb
           homebrew-tap: blacktop/homebrew-tap
+          base-branch: master
           download-url: https://github.com/blacktop/darwin-dyld-build/releases/download/${{ steps.release_tag.outputs.tag }}/dyld-tools-universal.tar.gz
         env:
           COMMITTER_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}

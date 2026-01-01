@@ -60,6 +60,18 @@ jobs:
           tar -czvf ../dyld-tools-universal.tar.gz *
           cd ..
 
+      - name: Prepare binaries for GoReleaser
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          mkdir -p bin/darwin-dyld-build_darwin_amd64
+          mkdir -p bin/darwin-dyld-build_darwin_arm64
+          # Extract arm64 binaries
+          lipo dist/dyld_info -thin arm64 -output bin/darwin-dyld-build_darwin_arm64/dyld_info
+          lipo dist/dyld_shared_cache_util -thin arm64 -output bin/darwin-dyld-build_darwin_arm64/dyld_shared_cache_util
+          # Extract amd64 binaries
+          lipo dist/dyld_info -thin x86_64 -output bin/darwin-dyld-build_darwin_amd64/dyld_info
+          lipo dist/dyld_shared_cache_util -thin x86_64 -output bin/darwin-dyld-build_darwin_amd64/dyld_shared_cache_util
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:

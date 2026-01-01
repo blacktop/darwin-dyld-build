@@ -239,9 +239,14 @@ install_binaries() {
     strip "${DIST_DIR}/dyld_info" 2>/dev/null || true
     strip "${DIST_DIR}/dyld_shared_cache_util" 2>/dev/null || true
 
-    # Ad-hoc sign binaries
-    codesign -s - "${DIST_DIR}/dyld_info" 2>/dev/null || true
-    codesign -s - "${DIST_DIR}/dyld_shared_cache_util" 2>/dev/null || true
+    # Ad-hoc sign binaries to avoid Gatekeeper killing them
+    running "Signing binaries with ad-hoc signature..."
+    codesign --force --sign - "${DIST_DIR}/dyld_info"
+    codesign --force --sign - "${DIST_DIR}/dyld_shared_cache_util"
+
+    # Verify signatures
+    codesign --verify --verbose "${DIST_DIR}/dyld_info"
+    codesign --verify --verbose "${DIST_DIR}/dyld_shared_cache_util"
 
     info "Installed binaries:"
     ls -lh "${DIST_DIR}"/dyld_*

@@ -60,18 +60,6 @@ jobs:
           tar -czvf ../dyld-tools-universal.tar.gz *
           cd ..
 
-      - name: Prepare binaries for GoReleaser
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          mkdir -p bin/darwin-dyld-build_darwin_amd64
-          mkdir -p bin/darwin-dyld-build_darwin_arm64
-          # Extract arm64 binaries
-          lipo dist/dyld_info -thin arm64 -output bin/darwin-dyld-build_darwin_arm64/dyld_info
-          lipo dist/dyld_shared_cache_util -thin arm64 -output bin/darwin-dyld-build_darwin_arm64/dyld_shared_cache_util
-          # Extract amd64 binaries
-          lipo dist/dyld_info -thin x86_64 -output bin/darwin-dyld-build_darwin_amd64/dyld_info
-          lipo dist/dyld_shared_cache_util -thin x86_64 -output bin/darwin-dyld-build_darwin_amd64/dyld_shared_cache_util
-
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:
@@ -92,4 +80,37 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Homebrew Cask
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          SHA256=$(shasum -a 256 dyld-tools-universal.tar.gz | awk '{print $1}')
+
+          cat > dyld-tools.rb << EOF
+          cask "dyld-tools" do
+            version "${TAG#v}"
+            sha256 "${SHA256}"
+
+            url "https://github.com/blacktop/darwin-dyld-build/releases/download/${TAG}/dyld-tools-universal.tar.gz"
+            name "dyld-tools"
+            desc "Apple dyld tools built for macOS"
+            homepage "https://github.com/blacktop/darwin-dyld-build"
+
+            binary "dyld_info"
+            binary "dyld_shared_cache_util"
+          end
+          EOF
+
+          # Clone tap and update cask
+          git clone https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/blacktop/homebrew-tap.git tap
+          mkdir -p tap/Casks
+          cp dyld-tools.rb tap/Casks/
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/dyld-tools.rb
+          git commit -m "Update dyld-tools to ${TAG}"
+          git push

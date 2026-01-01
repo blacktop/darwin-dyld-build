@@ -1,0 +1,1545 @@
+diff --git a/common/ClosureFileSystemPhysical.cpp b/common/ClosureFileSystemPhysical.cpp
+index b62f7f2..ec7ee41 100644
+--- a/common/ClosureFileSystemPhysical.cpp
++++ b/common/ClosureFileSystemPhysical.cpp
+@@ -35,7 +35,15 @@
+ #include <mach/mach.h>
+ #if !TARGET_OS_SIMULATOR && !TARGET_OS_DRIVERKIT
+   #include <sandbox.h>
+-  #include <sandbox/private.h>
++  #if __has_include(<sandbox/private.h>)
++    #include <sandbox/private.h>
++  #else
++    // Public SDK stub for sandbox_check
++    typedef int sandbox_filter_type;
++    static inline int sandbox_check(pid_t, const char*, sandbox_filter_type, ...) { return 0; }
++    #define SANDBOX_CHECK_NO_REPORT 0x0001
++    #define SANDBOX_FILTER_PATH 0x0001
++  #endif
+ #endif
+ #include <TargetConditionals.h>
+ #include "MachOFile.h"
+diff --git a/common/Defines.h b/common/Defines.h
+index a7f56b6..fee80e3 100644
+--- a/common/Defines.h
++++ b/common/Defines.h
+@@ -165,7 +165,7 @@ static_assert((DYLD_FEATURE_SIMULATOR_NOTIFICATION_HOST_SUPPORT && DYLD_FEATURE_
+ 
+ #define SUPPORT_CLASSIC_RELOCS (!TARGET_OS_EXCLAVEKIT && (!BUILDING_DYLD || TARGET_OS_OSX) )
+ 
+-#if TARGET_OS_DRIVERKIT || TARGET_OS_EXCLAVEKIT || BUILDING_ALLOCATOR_UNIT_TESTS
++#if TARGET_OS_DRIVERKIT || TARGET_OS_EXCLAVEKIT || BUILDING_ALLOCATOR_UNIT_TESTS || !__has_include(<CrashReporterClient.h>)
+     #define ENABLE_CRASH_REPORTER (0)
+     #define CRSetCrashLogMessage(x)
+     #define CRSetCrashLogMessage2(x)
+diff --git a/common/Diagnostics.cpp b/common/Diagnostics.cpp
+index 678d313..28c1e8f 100644
+--- a/common/Diagnostics.cpp
++++ b/common/Diagnostics.cpp
+@@ -32,8 +32,25 @@
+ #if TARGET_OS_EXCLAVEKIT
+   extern "C" void abort_report_np(const char* format, ...) __attribute__((noreturn,format(printf, 1, 2)));
+ #else
+-  #include <_simple.h>
+-  #include <libc_private.h>
++  #if __has_include(<_simple.h>)
++    #include <_simple.h>
++  #endif
++  #if __has_include(<libc_private.h>)
++    #include <libc_private.h>
++  #else
++    // Public SDK stub for abort_report_np from libc_private.h
++    #include <cstdarg>
++    #include <cstdlib>
++    __attribute__((noreturn,format(printf, 1, 2)))
++    static void abort_report_np(const char* format, ...) {
++        va_list args;
++        va_start(args, format);
++        vfprintf(stderr, format, args);
++        va_end(args);
++        fprintf(stderr, "\n");
++        abort();
++    }
++  #endif
+ #endif
+ #if BUILDING_CACHE_BUILDER || BUILDING_UNIT_TESTS || BUILDING_CACHE_BUILDER_UNIT_TESTS
+   #include <mach/mach_time.h> // mach_absolute_time()
+diff --git a/common/FileManager.cpp b/common/FileManager.cpp
+index fadfaee..5fce5df 100644
+--- a/common/FileManager.cpp
++++ b/common/FileManager.cpp
+@@ -33,7 +33,15 @@
+ #include <sys/param.h>
+ #include <sys/ucred.h>
+ #include <sys/mount.h>
+-#include <System/sys/fsgetpath.h>
++#if __has_include(<System/sys/fsgetpath.h>)
++  #include <System/sys/fsgetpath.h>
++#else
++  // Public SDK stub - fsgetpath is internal
++  extern "C" ssize_t fsgetpath(char *buf, size_t buflen, fsid_t *fsid, uint64_t objid);
++#endif
++
++// openbyid_np is internal - always declare extern (not in public SDK's sys/attr.h)
++extern "C" int openbyid_np(fsid_t* fsid, fsobj_id_t* objid, int flags);
+ 
+ #include "FileManager.h"
+ 
+diff --git a/common/MachOFile.cpp b/common/MachOFile.cpp
+index 4f6f296..2280d6b 100644
+--- a/common/MachOFile.cpp
++++ b/common/MachOFile.cpp
+@@ -46,9 +46,10 @@
+   #include <mach-o/x86_64/reloc.h>
+ #endif
+ extern "C" {
+-  #include <corecrypto/ccdigest.h>
+-  #include <corecrypto/ccsha1.h>
+-  #include <corecrypto/ccsha2.h>
++  // FIXME: corecrypto headers require internal SDK - commenting out for public SDK build
++  // #include <corecrypto/ccdigest.h>
++  // #include <corecrypto/ccsha1.h>
++  // #include <corecrypto/ccsha2.h>
+ }
+ #endif
+ 
+@@ -2228,7 +2229,10 @@ void MachOFile::forEachCodeDirectoryBlob(const void* codeSigStart, size_t codeSi
+     if ( bestCd != nullptr )
+         callback(bestCd);
+ }
++#endif // !TARGET_OS_EXCLAVEKIT
+ 
++// FIXME: forEachCDHashOfCodeSignature requires corecrypto from internal SDK
++#if !TARGET_OS_EXCLAVEKIT && 0
+ void MachOFile::forEachCDHashOfCodeSignature(const void* codeSigStart, size_t codeSignLen,
+                                              void (^callback)(const uint8_t cdHash[20])) const
+ {
+@@ -2275,6 +2279,14 @@ void MachOFile::forEachCDHashOfCodeSignature(const void* codeSigStart, size_t co
+         }
+     });
+ }
++#else // !TARGET_OS_EXCLAVEKIT && corecrypto disabled
++// FIXME: Stub implementation when corecrypto is not available
++void MachOFile::forEachCDHashOfCodeSignature(const void* codeSigStart, size_t codeSignLen,
++                                             void (^callback)(const uint8_t cdHash[20])) const
++{
++    // Code signature hash computation requires corecrypto from internal SDK
++    // This is a stub implementation for public SDK builds
++}
+ #endif // !TARGET_OS_EXCLAVEKIT
+ 
+ // These are mangled symbols for all the variants of operator new and delete
+diff --git a/common/MachOLoaded.cpp b/common/MachOLoaded.cpp
+index 9eb1ee7..3c86f0f 100644
+--- a/common/MachOLoaded.cpp
++++ b/common/MachOLoaded.cpp
+@@ -41,9 +41,9 @@
+ 
+ #if !TARGET_OS_EXCLAVEKIT
+ extern "C" {
+-  #include <corecrypto/ccdigest.h>
+-  #include <corecrypto/ccsha1.h>
+-  #include <corecrypto/ccsha2.h>
++//  #include <corecrypto/ccdigest.h>
++//  #include <corecrypto/ccsha1.h>
++//  #include <corecrypto/ccsha2.h>
+ }
+ #endif
+ 
+diff --git a/configs/base.xcconfig b/configs/base.xcconfig
+index b2f4a02..336a1fe 100644
+--- a/configs/base.xcconfig
++++ b/configs/base.xcconfig
+@@ -85,11 +85,14 @@ TRUSTED_CODE_SIGN_IDENTITY = $(DYLD_SIGNING_IDENTITY_$(DYLD_USE_AMFI_TRUSTED_KEY
+ CODE_SIGN_IDENTITY = -
+ CODE_SIGN_STYLE = Automatic
+ 
+-SDKROOT = macosx.internal
++// FIXME: Changed from macosx.internal to allow building with public SDK
++SDKROOT = macosx
+ 
+ DEBUG_INFORMATION_FORMAT[config=Debug] = dwarf
+ DEBUG_INFORMATION_FORMAT[config=Release] = dwarf-with-dsym
+ 
++// Define TARGET_OS_EXCLAVEKIT=0 to suppress undefined warnings with public SDK
++GCC_PREPROCESSOR_DEFINITIONS = TARGET_OS_EXCLAVEKIT=0 $(inherited)
+ GCC_PREPROCESSOR_DEFINITIONS[config=Debug] = DEBUG=1 $(inherited)
+ SWIFT_ACTIVE_COMPILATION_CONDITIONS[config=Debug] = DEBUG $(inherited)
+ 
+diff --git a/configs/dyld_info.xcconfig b/configs/dyld_info.xcconfig
+index afa9a4e..7d67290 100644
+--- a/configs/dyld_info.xcconfig
++++ b/configs/dyld_info.xcconfig
+@@ -23,7 +23,8 @@ LD_RUNPATH_SEARCH_PATHS                              =
+ LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]                 = @executable_path/../lib/
+ LD_RUNPATH_SEARCH_PATHS[config=Debug][sdk=macosx*]   = @executable_path/../lib/ /var/select/developer_dir/Toolchains/XcodeDefault.xctoolchain/usr/lib/
+ 
+-OTHER_LDFLAGS = $(inherited) -lCrashReporterClient
++// FIXME: libCrashReporterClient is internal - removed for public SDK build
++// OTHER_LDFLAGS = $(inherited) -lCrashReporterClient
+ 
+ // TODO: Clean these up.  They were moved from the build settings
+ LIBRARY_SEARCH_PATHS = $(TOOLCHAIN_DIR)/usr/lib/
+diff --git a/dyld.xcodeproj/project.pbxproj b/dyld.xcodeproj/project.pbxproj
+index b8a5165..a0ab899 100644
+--- a/dyld.xcodeproj/project.pbxproj
++++ b/dyld.xcodeproj/project.pbxproj
+@@ -8007,6 +8007,7 @@
+ 			baseConfigurationReferenceAnchor = C1C6014F2D66AAD700D7E3B7 /* configs */;
+ 			baseConfigurationReferenceRelativePath = dyld_info.xcconfig;
+ 			buildSettings = {
++				SDKROOT = macosx;
+ 			};
+ 			name = Debug;
+ 		};
+@@ -8015,6 +8016,7 @@
+ 			baseConfigurationReferenceAnchor = C1C6014F2D66AAD700D7E3B7 /* configs */;
+ 			baseConfigurationReferenceRelativePath = dyld_info.xcconfig;
+ 			buildSettings = {
++				SDKROOT = macosx;
+ 			};
+ 			name = Release;
+ 		};
+@@ -8103,6 +8105,8 @@
+ 			baseConfigurationReferenceAnchor = C1C6014F2D66AAD700D7E3B7 /* configs */;
+ 			baseConfigurationReferenceRelativePath = dyld_shared_cache_util.xcconfig;
+ 			buildSettings = {
++				SDKROOT = macosx;
++				SUPPORTED_PLATFORMS = macosx;
+ 			};
+ 			name = Debug;
+ 		};
+@@ -8111,6 +8115,8 @@
+ 			baseConfigurationReferenceAnchor = C1C6014F2D66AAD700D7E3B7 /* configs */;
+ 			baseConfigurationReferenceRelativePath = dyld_shared_cache_util.xcconfig;
+ 			buildSettings = {
++				SDKROOT = macosx;
++				SUPPORTED_PLATFORMS = macosx;
+ 			};
+ 			name = Release;
+ 		};
+diff --git a/dyld/DyldDelegates.cpp b/dyld/DyldDelegates.cpp
+index 960f18b..a105798 100644
+--- a/dyld/DyldDelegates.cpp
++++ b/dyld/DyldDelegates.cpp
+@@ -25,20 +25,21 @@
+ //#include <_simple.h>
+ #include <stdint.h>
+ #include <string.h>
++#include <cstdlib>
+ 
+ #include <mach-o/dyld_priv.h>
+ #if (BUILDING_DYLD || BUILDING_CLOSURE_UTIL || BUILDING_SHARED_CACHE_UTIL || BUILDING_CACHE_BUILDER) && !TARGET_OS_EXCLAVEKIT
+     #include <sys/attr.h>
+-    #include <sys/fsgetpath.h>
++    #if __has_include(<sys/fsgetpath.h>)
++      #include <sys/fsgetpath.h>
++    #else
++      extern "C" ssize_t fsgetpath(char *buf, size_t buflen, fsid_t *fsid, uint64_t objid);
++    #endif
+     #include <sys/socket.h>
+     #include <sys/syslog.h>
+     #include <sys/uio.h>
+     #include <sys/un.h>
+-    #if __arm64__
+-        #include <System/sys/mman.h>
+-    #else
+-        #include <sys/mman.h>
+-    #endif
++    #include <sys/mman.h>
+     #include <sys/stat.h>
+     #include <sys/types.h>
+     #include <sys/xattr.h>
+@@ -47,19 +48,55 @@
+     #include <sys/param.h>
+     #include <sys/mount.h>
+     #include <dirent.h>
+-    #include <System/sys/csr.h>
+-    #include <System/sys/reason.h>
+-    #include <kern/kcdata.h>
++    #if __has_include(<System/sys/csr.h>)
++      #include <System/sys/csr.h>
++    #else
++      #define CSR_ALLOW_APPLE_INTERNAL 0x10
++      static inline int csr_check(uint32_t) { return -1; }
++    #endif
++    #if __has_include(<System/sys/reason.h>)
++      #include <System/sys/reason.h>
++    #else
++      #define OS_REASON_DYLD 6
++      static inline void abort_with_payload(uint32_t, uint64_t, void*, uint32_t, const char*, uint64_t) __attribute__((noreturn));
++      static inline void abort_with_payload(uint32_t, uint64_t, void*, uint32_t, const char*, uint64_t) { abort(); }
++    #endif
++    #if __has_include(<kern/kcdata.h>)
++      #include <kern/kcdata.h>
++    #else
++      #define KCDATA_TYPE_INVALID 0
++    #endif
+     //FIXME: Hack to avoid <sys/commpage.h> being included by <System/machine/cpu_capabilities.h>
+-    #include <System/sys/commpage.h>
+-    #include <System/machine/cpu_capabilities.h>
+-    #include <System/sys/content_protection.h>
+-    #include <sandbox/private.h>
++    #if __has_include(<System/sys/commpage.h>)
++      #include <System/sys/commpage.h>
++    #endif
++    #if __has_include(<System/machine/cpu_capabilities.h>)
++      #include <System/machine/cpu_capabilities.h>
++    #endif
++    #if __has_include(<System/sys/content_protection.h>)
++      #include <System/sys/content_protection.h>
++    #else
++      #define PROTECTION_CLASS_DEFAULT 0
++    #endif
++    #if __has_include(<sandbox/private.h>)
++      #include <sandbox/private.h>
++    #else
++      // Public SDK stub for sandbox_check
++      static inline int sandbox_check(pid_t, const char*, int, ...) { return 0; }
++      #define SANDBOX_CHECK_NO_REPORT 0x0001
++      #define SANDBOX_FILTER_PATH 0x0001
++    #endif
+     #include <sys/syscall.h>
+     #include <sys/attr.h>
+     #include <sys/vnode.h>
+     #if !TARGET_OS_DRIVERKIT
++      #if __has_include(<vproc_priv.h>)
+         #include <vproc_priv.h>
++      #else
++        // Public SDK stub
++        static inline int vproc_swap_integer(void*, int, int64_t*, int64_t*) { return -1; }
++        #define VPROC_GSK_IS_MANAGED 0
++      #endif
+     #endif
+     // no libc header for send() syscall interface
+     extern "C" ssize_t __sendto(int, const void*, size_t, int, const struct sockaddr*, socklen_t);
+diff --git a/dyld/DyldProcessConfig.cpp b/dyld/DyldProcessConfig.cpp
+index 200d1a0..1064da9 100644
+--- a/dyld/DyldProcessConfig.cpp
++++ b/dyld/DyldProcessConfig.cpp
+@@ -26,11 +26,69 @@
+ #if TARGET_OS_EXCLAVEKIT
+   #include <liblibc/plat/dyld/exclaves_dyld.h>
+ #else
+-  #include <_simple.h>
++  #if __has_include(<_simple.h>)
++    #include <_simple.h>
++  #else
++    // Public SDK stubs for _simple.h functions
++    #include <cstdio>
++    #include <cstdarg>
++    #include <cstring>
++    static inline void _simple_dprintf(int fd, const char* fmt, ...) {
++        va_list args;
++        va_start(args, fmt);
++        vdprintf(fd, fmt, args);
++        va_end(args);
++    }
++    static inline void _simple_vdprintf(int fd, const char* fmt, va_list args) {
++        vdprintf(fd, fmt, args);
++    }
++    static inline const char* _simple_getenv(const char** envp, const char* key) {
++        if (!envp || !key) return nullptr;
++        size_t keyLen = strlen(key);
++        for (const char** p = envp; *p != nullptr; ++p) {
++            if (strncmp(*p, key, keyLen) == 0 && (*p)[keyLen] == '=')
++                return &(*p)[keyLen + 1];
++        }
++        return nullptr;
++    }
++  #endif
+   #include <stdint.h>
+-  #include <dyld/VersionMap.h>
++  #if __has_include(<dyld/VersionMap.h>)
++    #include <dyld/VersionMap.h>
++  #else
++    // Public SDK stub for VersionMap.h - used for Catalyst version mapping
++    namespace dyld3 {
++        struct VersionSetEntry {
++            uint32_t set;      // version set identifier
++            uint32_t macos;
++            uint32_t ios;
++            uint32_t watchos;
++            uint32_t tvos;
++            uint32_t bridgeos;
++            uint32_t visionos;
++        };
++        // Version map - maps OS versions across platforms for SDK compatibility
++        static constexpr VersionSetEntry sVersionMap[] = {
++            { 2019,  0x000A0F00, 0x000D0000, 0x00060000, 0x000D0000, 0x00040000, 0x00010000 }, // 10.15 / 13.0
++            { 2020,  0x000B0000, 0x000E0000, 0x00070000, 0x000E0000, 0x00050000, 0x00010000 }, // 11.0 / 14.0
++            { 2021,  0x000C0000, 0x000F0000, 0x00080000, 0x000F0000, 0x00060000, 0x00010000 }, // 12.0 / 15.0
++            { 2022,  0x000D0000, 0x00100000, 0x00090000, 0x00100000, 0x00070000, 0x00010000 }, // 13.0 / 16.0
++            { 2023,  0x000E0000, 0x00110000, 0x000A0000, 0x00110000, 0x00080000, 0x00010000 }, // 14.0 / 17.0
++            { 2024,  0x000F0000, 0x00120000, 0x000B0000, 0x00120000, 0x00090000, 0x00020000 }, // 15.0 / 18.0
++        };
++    }
++  #endif
+   #include <mach/mach_time.h> // mach_absolute_time()
+   #include <mach-o/dyld_priv.h>
++  #include <mach-o/loader.h>
++  // Compatibility: PLATFORM_IOSMAC is the old name for PLATFORM_MACCATALYST
++  #ifndef PLATFORM_IOSMAC
++    #ifdef PLATFORM_MACCATALYST
++      #define PLATFORM_IOSMAC PLATFORM_MACCATALYST
++    #else
++      #define PLATFORM_IOSMAC 6
++    #endif
++  #endif
+   #include <sys/syscall.h>
+   #if BUILDING_DYLD
+     #include <sys/types.h>
+@@ -40,17 +98,44 @@
+     #include <sys/uio.h>
+     #include <sys/un.h>
+     #include <sys/mman.h>
+-    #include <System/sys/csr.h>
+-    #include <System/sys/reason.h>
+-    #include <kern/kcdata.h>
++    #if __has_include(<System/sys/csr.h>)
++      #include <System/sys/csr.h>
++    #else
++      #define CSR_ALLOW_APPLE_INTERNAL 0x10
++      static inline int csr_check(uint32_t) { return -1; }
++    #endif
++    #if __has_include(<System/sys/reason.h>)
++      #include <System/sys/reason.h>
++    #else
++      #define OS_REASON_DYLD 6
++      static inline void abort_with_payload(uint32_t, uint64_t, void*, uint32_t, const char*, uint64_t) __attribute__((noreturn));
++      static inline void abort_with_payload(uint32_t, uint64_t, void*, uint32_t, const char*, uint64_t) { abort(); }
++    #endif
++    #if __has_include(<kern/kcdata.h>)
++      #include <kern/kcdata.h>
++    #else
++      #define KCDATA_TYPE_INVALID 0
++    #endif
+     //FIXME: Hack to avoid <sys/commpage.h> being included by <System/machine/cpu_capabilities.h>
+-    #include <System/sys/commpage.h>
+-    #include <System/machine/cpu_capabilities.h>
++    #if __has_include(<System/sys/commpage.h>)
++      #include <System/sys/commpage.h>
++    #endif
++    #if __has_include(<System/machine/cpu_capabilities.h>)
++      #include <System/machine/cpu_capabilities.h>
++    #endif
+     #if __arm64__ && !TARGET_OS_EXCLAVEKIT
++      #if __has_include(<arm/cpu_capabilities_public.h>)
+         #include <arm/cpu_capabilities_public.h>
++      #endif
+     #endif
+     #if !TARGET_OS_DRIVERKIT
++      #if __has_include(<vproc_priv.h>)
+         #include <vproc_priv.h>
++      #else
++        // Public SDK stub - vproc_priv functions are internal
++        static inline int vproc_swap_integer(void*, int, int64_t*, int64_t*) { return -1; }
++        #define VPROC_GSK_IS_MANAGED 0
++      #endif
+     #endif
+   // no libc header for send() syscall interface
+   extern "C" ssize_t __sendto(int, const void*, size_t, int, const struct sockaddr*, socklen_t);
+diff --git a/dyld/DyldRuntimeState.cpp b/dyld/DyldRuntimeState.cpp
+index fa7a8fc..7a14c4b 100644
+--- a/dyld/DyldRuntimeState.cpp
++++ b/dyld/DyldRuntimeState.cpp
+@@ -23,6 +23,7 @@
+ 
+ #include <TargetConditionals.h>
+ #include <stdint.h>
++#include <cstdlib>
+ #if !TARGET_OS_EXCLAVEKIT
+   #include <sys/sysctl.h>
+   #include <sys/socket.h>
+@@ -32,14 +33,56 @@
+   #include <sys/stat.h>
+   #include <sys/types.h>
+   #include <sys/mman.h>
+-  #include <System/sys/reason.h>
+-  #include <kern/kcdata.h>
++  #if __has_include(<System/sys/reason.h>)
++    #include <System/sys/reason.h>
++  #else
++    // Public SDK stub for System/sys/reason.h
++    #include <sys/types.h>
++    #define OS_REASON_DYLD 6
++    static inline void abort_with_payload(uint32_t, uint64_t, void*, uint32_t, const char*, uint64_t) __attribute__((noreturn));
++    static inline void abort_with_payload(uint32_t, uint64_t, void*, uint32_t, const char*, uint64_t) { abort(); }
++  #endif
++  #if __has_include(<kern/kcdata.h>)
++    #include <kern/kcdata.h>
++  #else
++    // Public SDK stub - kcdata types not needed for tools
++    #define KCDATA_TYPE_INVALID 0
++  #endif
+   #include <libkern/OSAtomic.h>
+-  #include <_simple.h>
++  #if __has_include(<_simple.h>)
++    #include <_simple.h>
++  #else
++    // Public SDK stubs for _simple.h functions
++    #include <cstdio>
++    #include <cstdarg>
++    static inline void _simple_dprintf(int fd, const char* fmt, ...) {
++        va_list args;
++        va_start(args, fmt);
++        vdprintf(fd, fmt, args);
++        va_end(args);
++    }
++    static inline void _simple_vdprintf(int fd, const char* fmt, va_list args) {
++        vdprintf(fd, fmt, args);
++    }
++    static inline const char* _simple_getenv(const char** envp, const char* key) {
++        if (!envp || !key) return nullptr;
++        size_t keyLen = strlen(key);
++        for (const char** p = envp; *p != nullptr; ++p) {
++            if (strncmp(*p, key, keyLen) == 0 && (*p)[keyLen] == '=')
++                return &(*p)[keyLen + 1];
++        }
++        return nullptr;
++    }
++  #endif
+   // atexit header is missing C++ guards
+-  extern "C" {
+-    #include <System/atexit.h>
+-  }
++  #if __has_include(<System/atexit.h>)
++    extern "C" {
++      #include <System/atexit.h>
++    }
++  #else
++    // Public SDK stub for atexit
++    struct __cxa_range_t { const void* addr; size_t length; };
++  #endif
+ #endif
+ #include <mach-o/dyld_priv.h>
+ #include <atomic>
+diff --git a/dyld/DyldRuntimeState.h b/dyld/DyldRuntimeState.h
+index b91992b..8dd5d5b 100644
+--- a/dyld/DyldRuntimeState.h
++++ b/dyld/DyldRuntimeState.h
+@@ -30,9 +30,15 @@
+ #include <mach-o/dyld_priv.h>
+ #include <TargetConditionals.h>
+ #if !TARGET_OS_EXCLAVEKIT
+-  #include <os/atomic_private.h>
+-  #include <os/lock_private.h>
+-  #include <sys/kern_memorystatus.h>
++  #if __has_include(<os/atomic_private.h>)
++    #include <os/atomic_private.h>
++  #endif
++  #if __has_include(<os/lock_private.h>)
++    #include <os/lock_private.h>
++  #endif
++  #if __has_include(<sys/kern_memorystatus.h>)
++    #include <sys/kern_memorystatus.h>
++  #endif
+ #endif
+ #include "Defines.h"
+ #include "MachOLoaded.h"
+diff --git a/dyld/Tracing.h b/dyld/Tracing.h
+index 9536f0b..ce644f2 100644
+--- a/dyld/Tracing.h
++++ b/dyld/Tracing.h
+@@ -52,7 +52,40 @@
+   #define DBG_DYLD_AOT_UUID_MAP_A         (15)
+   #define DBG_DYLD_AOT_UUID_MAP_B         (16)
+ #else
+-  #include <sys/kdebug_private.h>
++  #if __has_include(<sys/kdebug_private.h>)
++    #include <sys/kdebug_private.h>
++  #else
++    // Public SDK fallback - same definitions as EXCLAVEKIT (with guards)
++    #ifndef KDBG_CODE
++      #define KDBG_CODE(a, b, c) (c)
++    #endif
++    #ifndef DBG_DYLD_UUID
++      #define DBG_DYLD_UUID (5)
++    #endif
++    #ifndef KDEBUG_TRACE_STRING_DEFINED
++      #define KDEBUG_TRACE_STRING_DEFINED
++      // Stub for kdebug_trace_string
++      static inline uint64_t kdebug_trace_string(uint32_t, uint64_t, const char*) { return 0; }
++      static inline int kdebug_trace(uint32_t, ...) { return 0; }
++    #endif
++    #define DBG_DYLD_UUID_MAP_A             (0)
++    #define DBG_DYLD_UUID_MAP_B             (1)
++    #define DBG_DYLD_UUID_MAP_32_A          (2)
++    #define DBG_DYLD_UUID_MAP_32_B          (3)
++    #define DBG_DYLD_UUID_MAP_32_C          (4)
++    #define DBG_DYLD_UUID_UNMAP_A           (5)
++    #define DBG_DYLD_UUID_UNMAP_B           (6)
++    #define DBG_DYLD_UUID_UNMAP_32_A        (7)
++    #define DBG_DYLD_UUID_UNMAP_32_B        (8)
++    #define DBG_DYLD_UUID_UNMAP_32_C        (9)
++    #define DBG_DYLD_UUID_SHARED_CACHE_A    (10)
++    #define DBG_DYLD_UUID_SHARED_CACHE_B    (11)
++    #define DBG_DYLD_UUID_SHARED_CACHE_32_A (12)
++    #define DBG_DYLD_UUID_SHARED_CACHE_32_B (13)
++    #define DBG_DYLD_UUID_SHARED_CACHE_32_C (14)
++    #define DBG_DYLD_AOT_UUID_MAP_A         (15)
++    #define DBG_DYLD_AOT_UUID_MAP_B         (16)
++  #endif
+ #endif
+ 
+ #include "Defines.h"
+diff --git a/dyld/dyldSyscallInterface.h b/dyld/dyldSyscallInterface.h
+index 7248a47..76fbe33 100644
+--- a/dyld/dyldSyscallInterface.h
++++ b/dyld/dyldSyscallInterface.h
+@@ -47,13 +47,45 @@ __END_DECLS
+ #include <stdlib.h>
+ #include <sys/fcntl.h>
+ #include <sys/ioctl.h>
+-#include <sys/kdebug_private.h>
++#if __has_include(<sys/kdebug_private.h>)
++  #include <sys/kdebug_private.h>
++#else
++  // Public SDK stub - kdebug functions are internal (with guards)
++  #ifndef KDBG_CODE
++    #define KDBG_CODE(a, b, c) (c)
++  #endif
++  #ifndef DBG_DYLD
++    #define DBG_DYLD 31
++  #endif
++  #ifndef KDEBUG_TRACE_STRING_DEFINED
++    #define KDEBUG_TRACE_STRING_DEFINED
++    static inline uint64_t kdebug_trace_string(uint32_t, uint64_t, const char*) { return 0; }
++    static inline int kdebug_trace(uint32_t, ...) { return 0; }
++    static inline int kdebug_signpost(uint32_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t) { return 0; }
++    static inline int kdebug_signpost_start(uint32_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t) { return 0; }
++    static inline int kdebug_signpost_end(uint32_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t) { return 0; }
++    static inline bool kdebug_is_enabled(uint32_t) { return false; }
++  #endif
++#endif
+ #include <sys/mman.h>
+ #include <sys/stat.h>
+-#include <sys/fsgetpath.h>
++#if __has_include(<sys/fsgetpath.h>)
++  #include <sys/fsgetpath.h>
++#else
++  // Public SDK - fsgetpath is internal but we can declare extern
++  extern "C" ssize_t fsgetpath(char *buf, size_t buflen, fsid_t *fsid, uint64_t objid);
++#endif
+ #include <sys/sysctl.h>
+ #include <unistd.h>
+-#include <System/sys/reason.h>
++#if __has_include(<System/sys/reason.h>)
++  #include <System/sys/reason.h>
++#else
++  #ifndef OS_REASON_DYLD
++    #define OS_REASON_DYLD 6
++    static inline void abort_with_payload(uint32_t, uint64_t, void*, uint32_t, const char*, uint64_t) __attribute__((noreturn));
++    static inline void abort_with_payload(uint32_t, uint64_t, void*, uint32_t, const char*, uint64_t) { abort(); }
++  #endif
++#endif
+ 
+ struct dyld_all_image_infos;
+ 
+diff --git a/include/mach-o/dyld.h b/include/mach-o/dyld.h
+index 7bf19c0..16141ce 100644
+--- a/include/mach-o/dyld.h
++++ b/include/mach-o/dyld.h
+@@ -31,6 +31,19 @@
+ #include <Availability.h>
+ #include <TargetConditionals.h>
+ 
++// Provide fallback definitions for availability macros if not defined
++#ifndef __API_AVAILABLE
++ #define __API_AVAILABLE(...)
++#endif
++
++#ifndef __API_UNAVAILABLE
++ #define __API_UNAVAILABLE(...)
++#endif
++
++#ifndef __OSX_DEPRECATED
++ #define __OSX_DEPRECATED(...)
++#endif
++
+ #if __cplusplus
+ extern "C" {
+ #endif
+@@ -38,7 +51,13 @@ extern "C" {
+ #ifdef __DRIVERKIT_19_0
+  #define DYLD_DRIVERKIT_UNAVAILABLE __API_UNAVAILABLE(driverkit)
+ #else
+- #define DYLD_DRIVERKIT_UNAVAILABLE
++ #define DYLD_DRIVERKIT_UNAVAILABLE 
++#endif
++
++#ifdef __EXCLAVEKIT_19_0
++ #define DYLD_EXCLAVEKIT_UNAVAILABLE __API_UNAVAILABLE(exclavekit)
++#else
++ #define DYLD_EXCLAVEKIT_UNAVAILABLE 
+ #endif
+ 
+ 
+@@ -119,7 +138,7 @@ extern void _tlv_bootstrap(void)                                             __A
+  * cannot stat() the file to see if it "exists".  This function is like a stat() call that checks if a
+  * path is to a dylib that was removed from disk and is incorporated into the active dyld cache.
+  */
+-extern bool _dyld_shared_cache_contains_path(const char* path)               __API_AVAILABLE(macos(11.0), ios(14.0), watchos(7.0), tvos(14.0), bridgeos(5.0)) DYLD_DRIVERKIT_UNAVAILABLE;
++extern bool _dyld_shared_cache_contains_path(const char* path)               __API_AVAILABLE(macos(11.0), ios(14.0), watchos(7.0), tvos(14.0)) DYLD_DRIVERKIT_UNAVAILABLE;
+ 
+ 
+ /*
+@@ -148,6 +167,7 @@ extern bool _dyld_shared_cache_contains_path(const char* path)               __A
+ #endif /* ENUM_DYLD_BOOL */
+ 
+ 
++
+ /* Object file image API */
+ typedef enum {
+     NSObjectFileImageFailure, /* for this a message is printed on stderr */
+@@ -163,22 +183,22 @@ typedef struct __NSObjectFileImage* NSObjectFileImage;
+ 
+ 
+ /* NSObjectFileImage can only be used with MH_BUNDLE files */
+-extern NSObjectFileImageReturnCode NSCreateObjectFileImageFromFile(const char* pathName, NSObjectFileImage *objectFileImage)               __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlopen()");
+-extern NSObjectFileImageReturnCode NSCreateObjectFileImageFromMemory(const void *address, size_t size, NSObjectFileImage *objectFileImage) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
+-extern bool                        NSDestroyObjectFileImage(NSObjectFileImage objectFileImage)                                             __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlclose()");
++extern NSObjectFileImageReturnCode NSCreateObjectFileImageFromFile(const char* pathName, NSObjectFileImage *objectFileImage)               __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlopen()");
++extern NSObjectFileImageReturnCode NSCreateObjectFileImageFromMemory(const void *address, size_t size, NSObjectFileImage *objectFileImage) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
++extern bool                        NSDestroyObjectFileImage(NSObjectFileImage objectFileImage)                                             __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlclose()");
+ 
+-extern uint32_t     NSSymbolDefinitionCountInObjectFileImage(NSObjectFileImage objectFileImage)                   __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
+-extern const char*  NSSymbolDefinitionNameInObjectFileImage(NSObjectFileImage objectFileImage, uint32_t ordinal)  __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
+-extern uint32_t     NSSymbolReferenceCountInObjectFileImage(NSObjectFileImage objectFileImage)                    __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
+-extern const char*  NSSymbolReferenceNameInObjectFileImage(NSObjectFileImage objectFileImage, uint32_t ordinal, bool *tentative_definition) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
+-extern bool         NSIsSymbolDefinedInObjectFileImage(NSObjectFileImage objectFileImage, const char* symbolName) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlsym()");
+-extern void*        NSGetSectionDataInObjectFileImage(NSObjectFileImage objectFileImage, const char* segmentName, const char* sectionName, size_t *size) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "getsectiondata()");
++extern uint32_t     NSSymbolDefinitionCountInObjectFileImage(NSObjectFileImage objectFileImage)                   __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
++extern const char*  NSSymbolDefinitionNameInObjectFileImage(NSObjectFileImage objectFileImage, uint32_t ordinal)  __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
++extern uint32_t     NSSymbolReferenceCountInObjectFileImage(NSObjectFileImage objectFileImage)                    __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
++extern const char*  NSSymbolReferenceNameInObjectFileImage(NSObjectFileImage objectFileImage, uint32_t ordinal, bool *tentative_definition) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
++extern bool         NSIsSymbolDefinedInObjectFileImage(NSObjectFileImage objectFileImage, const char* symbolName) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlsym()");
++extern void*        NSGetSectionDataInObjectFileImage(NSObjectFileImage objectFileImage, const char* segmentName, const char* sectionName, size_t *size) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "getsectiondata()");
+ 
+ typedef struct __NSModule* NSModule;
+-extern const char*  NSNameOfModule(NSModule m)         __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
+-extern const char*  NSLibraryNameForModule(NSModule m) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
++extern const char*  NSNameOfModule(NSModule m)         __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
++extern const char*  NSLibraryNameForModule(NSModule m) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
+ 
+-extern NSModule NSLinkModule(NSObjectFileImage objectFileImage, const char* moduleName, uint32_t options) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlopen()");
++extern NSModule NSLinkModule(NSObjectFileImage objectFileImage, const char* moduleName, uint32_t options) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlopen()");
+ #define NSLINKMODULE_OPTION_NONE                         0x0
+ #define NSLINKMODULE_OPTION_BINDNOW                      0x1
+ #define NSLINKMODULE_OPTION_PRIVATE                      0x2
+@@ -186,27 +206,27 @@ extern NSModule NSLinkModule(NSObjectFileImage objectFileImage, const char* modu
+ #define NSLINKMODULE_OPTION_DONT_CALL_MOD_INIT_ROUTINES  0x8
+ #define NSLINKMODULE_OPTION_TRAILING_PHYS_NAME          0x10
+ 
+-extern bool NSUnLinkModule(NSModule module, uint32_t options) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
++extern bool NSUnLinkModule(NSModule module, uint32_t options) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
+ #define NSUNLINKMODULE_OPTION_NONE                  0x0
+ #define NSUNLINKMODULE_OPTION_KEEP_MEMORY_MAPPED    0x1
+ #define NSUNLINKMODULE_OPTION_RESET_LAZY_REFERENCES	0x2
+ 
+ /* symbol API */
+ typedef struct __NSSymbol* NSSymbol;
+-extern bool     NSIsSymbolNameDefined(const char* symbolName)                                                    __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlsym()");
+-extern bool     NSIsSymbolNameDefinedWithHint(const char* symbolName, const char* libraryNameHint)               __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlsym()");
+-extern bool     NSIsSymbolNameDefinedInImage(const struct mach_header* image, const char* symbolName)            __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlsym()");
+-extern NSSymbol NSLookupAndBindSymbol(const char* symbolName)                                                    __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlsym()");
+-extern NSSymbol NSLookupAndBindSymbolWithHint(const char* symbolName, const char* libraryNameHint)               __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlsym()");
+-extern NSSymbol NSLookupSymbolInModule(NSModule module, const char* symbolName)                                  __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlsym()");
+-extern NSSymbol NSLookupSymbolInImage(const struct mach_header* image, const char* symbolName, uint32_t options) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlsym()");
++extern bool     NSIsSymbolNameDefined(const char* symbolName)                                                    __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlsym()");
++extern bool     NSIsSymbolNameDefinedWithHint(const char* symbolName, const char* libraryNameHint)               __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlsym()");
++extern bool     NSIsSymbolNameDefinedInImage(const struct mach_header* image, const char* symbolName)            __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlsym()");
++extern NSSymbol NSLookupAndBindSymbol(const char* symbolName)                                                    __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlsym()");
++extern NSSymbol NSLookupAndBindSymbolWithHint(const char* symbolName, const char* libraryNameHint)               __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlsym()");
++extern NSSymbol NSLookupSymbolInModule(NSModule module, const char* symbolName)                                  __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlsym()");
++extern NSSymbol NSLookupSymbolInImage(const struct mach_header* image, const char* symbolName, uint32_t options) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlsym()");
+ #define NSLOOKUPSYMBOLINIMAGE_OPTION_BIND            0x0
+ #define NSLOOKUPSYMBOLINIMAGE_OPTION_BIND_NOW        0x1
+ #define NSLOOKUPSYMBOLINIMAGE_OPTION_BIND_FULLY      0x2
+ #define NSLOOKUPSYMBOLINIMAGE_OPTION_RETURN_ON_ERROR 0x4
+-extern const char*  NSNameOfSymbol(NSSymbol symbol)    __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
+-extern void *       NSAddressOfSymbol(NSSymbol symbol) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlsym()");
+-extern NSModule     NSModuleForSymbol(NSSymbol symbol) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dladdr()");
++extern const char*  NSNameOfSymbol(NSSymbol symbol)    __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
++extern void *       NSAddressOfSymbol(NSSymbol symbol) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlsym()");
++extern NSModule     NSModuleForSymbol(NSSymbol symbol) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dladdr()");
+ 
+ /* error handling API */
+ typedef enum {
+@@ -234,7 +254,7 @@ typedef enum {
+     NSOtherErrorInvalidArgs
+ } NSOtherErrorNumbers;
+ 
+-extern void NSLinkEditError(NSLinkEditErrors *c, int *errorNumber, const char** fileName, const char** errorString) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlerror()");
++extern void NSLinkEditError(NSLinkEditErrors *c, int *errorNumber, const char** fileName, const char** errorString) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlerror()");
+ 
+ typedef struct {
+      void     (*undefined)(const char* symbolName);
+@@ -243,27 +263,27 @@ typedef struct {
+                           const char* fileName, const char* errorString);
+ } NSLinkEditErrorHandlers;
+ 
+-extern void NSInstallLinkEditErrorHandlers(const NSLinkEditErrorHandlers *handlers) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
++extern void NSInstallLinkEditErrorHandlers(const NSLinkEditErrorHandlers *handlers) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "");
+ 
+-extern bool                      NSAddLibrary(const char* pathName)                   __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlopen()");
+-extern bool                      NSAddLibraryWithSearching(const char* pathName)      __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlopen()");
+-extern const struct mach_header* NSAddImage(const char* image_name, uint32_t options) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlopen()");
++extern bool                      NSAddLibrary(const char* pathName)                   __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlopen()");
++extern bool                      NSAddLibraryWithSearching(const char* pathName)      __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlopen()");
++extern const struct mach_header* NSAddImage(const char* image_name, uint32_t options) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlopen()");
+ #define NSADDIMAGE_OPTION_NONE                  	0x0
+ #define NSADDIMAGE_OPTION_RETURN_ON_ERROR       	0x1
+ #define NSADDIMAGE_OPTION_WITH_SEARCHING        	0x2
+ #define NSADDIMAGE_OPTION_RETURN_ONLY_IF_LOADED 	0x4
+ #define NSADDIMAGE_OPTION_MATCH_FILENAME_BY_INSTALLNAME	0x8
+ 
+-extern bool _dyld_present(void)                                                              __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "always true");
+-extern bool _dyld_launched_prebound(void)                                                    __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "moot");
+-extern bool _dyld_all_twolevel_modules_prebound(void)                                        __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.3, 10.5, "moot");
+-extern bool _dyld_bind_fully_image_containing_address(const void* address)                   __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlopen(RTLD_NOW)");
+-extern bool _dyld_image_containing_address(const void* address)                              __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.3, 10.5, "dladdr()");
+-extern void _dyld_lookup_and_bind(const char* symbol_name, void **address, NSModule* module) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlsym()");
+-extern void _dyld_lookup_and_bind_with_hint(const char* symbol_name, const char* library_name_hint, void** address, NSModule* module) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlsym()");
+-extern void _dyld_lookup_and_bind_fully(const char* symbol_name, void** address, NSModule* module) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlsym()");
++extern bool _dyld_present(void)                                                              __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "always true");
++extern bool _dyld_launched_prebound(void)                                                    __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "moot");
++extern bool _dyld_all_twolevel_modules_prebound(void)                                        __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.3, 10.5, "moot");
++extern bool _dyld_bind_fully_image_containing_address(const void* address)                   __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlopen(RTLD_NOW)");
++extern bool _dyld_image_containing_address(const void* address)                              __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.3, 10.5, "dladdr()");
++extern void _dyld_lookup_and_bind(const char* symbol_name, void **address, NSModule* module) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlsym()");
++extern void _dyld_lookup_and_bind_with_hint(const char* symbol_name, const char* library_name_hint, void** address, NSModule* module) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.4, "dlsym()");
++extern void _dyld_lookup_and_bind_fully(const char* symbol_name, void** address, NSModule* module) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.1, 10.5, "dlsym()");
+ 
+-extern const struct mach_header*  _dyld_get_image_header_containing_address(const void* address) __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.3, 10.5, "dladdr()");
++extern const struct mach_header*  _dyld_get_image_header_containing_address(const void* address) __API_UNAVAILABLE(ios, tvos, watchos) DYLD_DRIVERKIT_UNAVAILABLE DYLD_EXCLAVEKIT_UNAVAILABLE __OSX_DEPRECATED(10.3, 10.5, "dladdr()");
+ 
+ 
+ #if __cplusplus
+diff --git a/include/mach-o/dyld_introspection.h b/include/mach-o/dyld_introspection.h
+index ee71a6c..e9a54d0 100644
+--- a/include/mach-o/dyld_introspection.h
++++ b/include/mach-o/dyld_introspection.h
+@@ -43,10 +43,14 @@ typedef uint32_t dyld_platform_t;
+ #endif
+ 
+ // FIXME: We should improve the documentation once rdar://58760015 is fixed
+-#define DYLD_MACOS_12_SPI SPI_AVAILABLE(macos(12.0)) API_UNAVAILABLE(ios,watchos,tvos,bridgeos)
+-
+-#define DYLD_MACOS_12_ALIGNED_SPI SPI_AVAILABLE(macos(12.0), ios(15.0), tvos(15.0), watchos(8.0), bridgeos(6.0))
+-#define DYLD_MACOS_13_ALIGNED_SPI SPI_AVAILABLE(macos(13.0), ios(16.0), tvos(16.0), watchos(9.0), bridgeos(7.0))
++// FIXME: SPI_AVAILABLE requires internal SDK - commenting out for public SDK build
++// #define DYLD_MACOS_12_SPI SPI_AVAILABLE(macos(12.0)) API_UNAVAILABLE(ios,watchos,tvos,bridgeos)
++#define DYLD_MACOS_12_SPI
++
++// #define DYLD_MACOS_12_ALIGNED_SPI SPI_AVAILABLE(macos(12.0), ios(15.0), tvos(15.0), watchos(8.0), bridgeos(6.0))
++#define DYLD_MACOS_12_ALIGNED_SPI
++// #define DYLD_MACOS_13_ALIGNED_SPI SPI_AVAILABLE(macos(13.0), ios(16.0), tvos(16.0), watchos(9.0), bridgeos(7.0))
++#define DYLD_MACOS_13_ALIGNED_SPI
+ 
+ #if BUILDING_CACHE_BUILDER || ENABLE_DYLD_STATIC_ROSETTA_RUNTIME_SUPPORT
+ #define DYLD_MACOS_12_ALIGNED_AND_STATIC_SPI
+diff --git a/include/mach-o/dyld_priv.h b/include/mach-o/dyld_priv.h
+index e4b410c..0dd3adc 100644
+--- a/include/mach-o/dyld_priv.h
++++ b/include/mach-o/dyld_priv.h
+@@ -254,7 +254,7 @@ typedef struct {
+ } dyld_build_version_t;
+ 
+ // Returns the active platform of the process
+-extern dyld_platform_t dyld_get_active_platform(void) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
++extern dyld_platform_t dyld_get_active_platform(void) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0));
+ 
+ // Base platforms are platforms that have version numbers (macOS, iOS, watchos, tvOS, bridgeOS)
+ // All other platforms are mapped to a base platform for version checks
+@@ -280,36 +280,36 @@ extern dyld_platform_t dyld_get_active_platform(void) __API_AVAILABLE(macos(10.1
+ //      Old behaviour all other platforms, as well as older iOSes and watchOSes
+ //  }
+ 
+-extern dyld_platform_t dyld_get_base_platform(dyld_platform_t platform) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
++extern dyld_platform_t dyld_get_base_platform(dyld_platform_t platform) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0));
+ 
+ // SPI to ask if a platform is a simulation platform
+-extern bool dyld_is_simulator_platform(dyld_platform_t platform) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
++extern bool dyld_is_simulator_platform(dyld_platform_t platform) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0));
+ 
+ // Takes a version and returns if the image was built against that SDK or newer
+ // In the case of multi_platform mach-o's it tests against the active platform
+-extern bool dyld_sdk_at_least(const struct mach_header* mh, dyld_build_version_t version) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
++extern bool dyld_sdk_at_least(const struct mach_header* mh, dyld_build_version_t version) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0));
+ 
+ // Takes a version and returns if the image was built with that minos version or newer
+ // In the case of multi_plaform mach-o's it tests against the active platform
+-extern bool dyld_minos_at_least(const struct mach_header* mh, dyld_build_version_t version) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
++extern bool dyld_minos_at_least(const struct mach_header* mh, dyld_build_version_t version) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0));
+ 
+ // Convenience versions of the previous two functions that run against the the main executable
+-extern bool dyld_program_sdk_at_least(dyld_build_version_t version) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
+-extern bool dyld_program_minos_at_least(dyld_build_version_t version) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
++extern bool dyld_program_sdk_at_least(dyld_build_version_t version) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0));
++extern bool dyld_program_minos_at_least(dyld_build_version_t version) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0));
+ 
+ // Returns a token that can be used for version compares. This is intend to be used by frameworks that
+ // must send the information over to a daemon which performs the compare. These values should not be stored and
+ // are not guaranteed to be stable between OS releases.
+ 
+-extern uint64_t dyld_get_program_sdk_version_token()  __SPI_AVAILABLE(macos(15.0), ios(18.0), watchos(11.0), tvos(18.0), bridgeos(9.0));
+-extern uint64_t dyld_get_program_minos_version_token()  __SPI_AVAILABLE(macos(15.0), ios(18.0), watchos(11.0), tvos(18.0), bridgeos(9.0));
+-extern dyld_platform_t dyld_version_token_get_platform(uint64_t token) __SPI_AVAILABLE(macos(15.0), ios(18.0), watchos(11.0), tvos(18.0), bridgeos(9.0));
+-extern bool dyld_version_token_at_least(uint64_t token, dyld_build_version_t version) __SPI_AVAILABLE(macos(15.0), ios(18.0), watchos(11.0), tvos(18.0), bridgeos(9.0));
++extern uint64_t dyld_get_program_sdk_version_token()  __SPI_AVAILABLE(macos(15.0), ios(18.0), watchos(11.0), tvos(18.0));
++extern uint64_t dyld_get_program_minos_version_token()  __SPI_AVAILABLE(macos(15.0), ios(18.0), watchos(11.0), tvos(18.0));
++extern dyld_platform_t dyld_version_token_get_platform(uint64_t token) __SPI_AVAILABLE(macos(15.0), ios(18.0), watchos(11.0), tvos(18.0));
++extern bool dyld_version_token_at_least(uint64_t token, dyld_build_version_t version) __SPI_AVAILABLE(macos(15.0), ios(18.0), watchos(11.0), tvos(18.0));
+ 
+ // Function that walks through the load commands and calls the internal block for every version found
+ // Intended as a fallback for very complex (and rare) version checks, or for tools that need to
+ // print our everything for diagnostic reasons
+-extern void dyld_get_image_versions(const struct mach_header* mh, void (^callback)(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version)) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0), bridgeos(3.0));
++extern void dyld_get_image_versions(const struct mach_header* mh, void (^callback)(dyld_platform_t platform, uint32_t sdk_version, uint32_t min_version)) __API_AVAILABLE(macos(10.14), ios(12.0), watchos(5.0), tvos(12.0));
+ 
+ // Convenience constants for dyld version SPIs.
+ 
+diff --git a/include/mach-o/dyld_process_info.h b/include/mach-o/dyld_process_info.h
+index bf1d995..0e37c65 100644
+--- a/include/mach-o/dyld_process_info.h
++++ b/include/mach-o/dyld_process_info.h
+@@ -126,13 +126,13 @@ extern void  _dyld_process_info_get_aot_cache(dyld_process_info info, dyld_proce
+ extern void _dyld_process_info_for_each_image(dyld_process_info info, void (^callback)(uint64_t machHeaderAddress, const uuid_t uuid, const char* path));
+ 
+ // iterate all aot images in process
+-extern void _dyld_process_info_for_each_aot_image(dyld_process_info info, bool (^callback)(uint64_t x86Address, uint64_t aotAddress, uint64_t aotSize, uint8_t* aotImageKey, size_t aotImageKeySize))  __API_UNAVAILABLE(ios, tvos, watchos) __API_UNAVAILABLE(bridgeos);
++extern void _dyld_process_info_for_each_aot_image(dyld_process_info info, bool (^callback)(uint64_t x86Address, uint64_t aotAddress, uint64_t aotSize, uint8_t* aotImageKey, size_t aotImageKeySize))  __API_UNAVAILABLE(ios, tvos, watchos);
+ 
+ // iterate all segments in an image
+ extern void _dyld_process_info_for_each_segment(dyld_process_info info, uint64_t machHeaderAddress, void (^callback)(uint64_t segmentAddress, uint64_t segmentSize, const char* segmentName));
+ 
+ // returns 0 if the platform cannot be determined, otherwise returns the platform of the remote process
+-extern dyld_platform_t _dyld_process_info_get_platform(dyld_process_info info) SPI_AVAILABLE(macos(10.15), ios(13.0), tvos(13.0), watchos(6.0), bridgeos(4.0));
++extern dyld_platform_t _dyld_process_info_get_platform(dyld_process_info info) SPI_AVAILABLE(macos(10.15), ios(13.0), tvos(13.0), watchos(6.0));
+ 
+ typedef const struct dyld_process_info_notify_base* dyld_process_info_notify;
+ 
+diff --git a/libdyld/LibSystemHelpers.h b/libdyld/LibSystemHelpers.h
+index efbbcd8..7d7ae36 100644
+--- a/libdyld/LibSystemHelpers.h
++++ b/libdyld/LibSystemHelpers.h
+@@ -53,19 +53,37 @@
+   #define OS_UNFAIR_LOCK_NONE 0
+ #else
+   #include <pthread.h>
+-  #include <pthread/tsd_private.h>
++  #if __has_include(<pthread/tsd_private.h>)
++    #include <pthread/tsd_private.h>
++  #endif
+   #include <unistd.h>
+   #include <malloc/malloc.h>
+-  #include <os/lock_private.h>
++  #if __has_include(<os/lock_private.h>)
++    #include <os/lock_private.h>
++    typedef os_unfair_recursive_lock     dyld_recursive_mutex;
++    typedef os_unfair_recursive_lock_t   dyld_recursive_mutex_t;
++    typedef os_unfair_lock               dyld_mutex;
++    typedef os_unfair_lock_t             dyld_mutex_t;
++  #else
++    // Public SDK stubs - provide minimal types
++    #include <os/lock.h>
++    typedef struct { os_unfair_lock lock; uint32_t count; } dyld_recursive_mutex;
++    typedef dyld_recursive_mutex*        dyld_recursive_mutex_t;
++    typedef os_unfair_lock               dyld_mutex;
++    typedef os_unfair_lock_t             dyld_mutex_t;
++    // os_unfair_lock_options_t is internal - provide stub
++    typedef struct os_unfair_lock_options_s { uint32_t foo; } *os_unfair_lock_options_t;
++    #define OS_UNFAIR_LOCK_NONE ((os_unfair_lock_options_t)0)
++  #endif
+   #include <mach/mach.h>
+   #include <mach/vm_types.h>
+   typedef pthread_key_t                dyld_thread_key_t;
+-  typedef os_unfair_recursive_lock     dyld_recursive_mutex;
+-  typedef os_unfair_recursive_lock_t   dyld_recursive_mutex_t;
+-  typedef os_unfair_lock               dyld_mutex;
+-  typedef os_unfair_lock_t             dyld_mutex_t;
+   inline int   dyld_thread_key_create(dyld_thread_key_t* key, void (*destructor)(void*)) { return ::pthread_key_create(key, destructor); }
+-  inline int   dyld_thread_key_init_np(dyld_thread_key_t key, void (*destructor)(void*)) { return ::pthread_key_init_np((int)key, destructor); }
++  #if __has_include(<pthread/tsd_private.h>)
++    inline int   dyld_thread_key_init_np(dyld_thread_key_t key, void (*destructor)(void*)) { return ::pthread_key_init_np((int)key, destructor); }
++  #else
++    inline int   dyld_thread_key_init_np(dyld_thread_key_t, void (*)(void*)) { return -1; } // stub
++  #endif
+   inline int   dyld_thread_setspecific(dyld_thread_key_t key, const void* value) { return ::pthread_setspecific(key, value); }
+   inline void* dyld_thread_getspecific(dyld_thread_key_t key) { return ::pthread_getspecific(key); }
+ #endif // !TARGET_OS_EXCLAVEKIT
+diff --git a/libdyld_introspection/dyld_introspection.cpp b/libdyld_introspection/dyld_introspection.cpp
+index 114a930..73816ff 100644
+--- a/libdyld_introspection/dyld_introspection.cpp
++++ b/libdyld_introspection/dyld_introspection.cpp
+@@ -26,7 +26,14 @@
+ 
+ #if !TARGET_OS_EXCLAVEKIT
+ 
+-#include <System/sys/csr.h> // For csr_check()
++#if __has_include(<System/sys/csr.h>)
++  #include <System/sys/csr.h> // For csr_check()
++#else
++  // Public SDK stub - assume SIP is enabled (non-internal install)
++  #include <stdint.h>
++  #define CSR_ALLOW_APPLE_INTERNAL 0x10
++  static inline int csr_check(uint32_t) { return -1; }
++#endif
+ 
+ #include "dyld_introspection.h"
+ #include "dyld_cache_format.h"
+diff --git a/lsl/Allocator.cpp b/lsl/Allocator.cpp
+index dfb803d..a7aa2f6 100644
+--- a/lsl/Allocator.cpp
++++ b/lsl/Allocator.cpp
+@@ -31,7 +31,12 @@
+ 
+ #if !TARGET_OS_EXCLAVEKIT
+ 
+-#include <System/sys/csr.h>
++#if __has_include(<System/sys/csr.h>)
++  #include <System/sys/csr.h>
++#else
++  #define CSR_ALLOW_APPLE_INTERNAL 0x10
++  static inline int csr_check(uint32_t) { return -1; }
++#endif
+ 
+   #include <sys/mman.h>
+   #include <mach/mach.h>
+@@ -59,6 +64,11 @@
+ 
+ #if !BUILDING_DYLD && !TARGET_OS_EXCLAVEKIT
+ #include <dispatch/dispatch.h>
++#include <os/lock.h>
++// Public SDK compatibility: os_unfair_lock_lock_with_options is internal
++#ifndef os_unfair_lock_lock_with_options
++  #define os_unfair_lock_lock_with_options(lock, options) os_unfair_lock_lock(lock)
++#endif
+ #endif
+ 
+ #if !DYLD_FEATURE_USE_INTERNAL_ALLOCATOR
+diff --git a/lsl/Allocator.h b/lsl/Allocator.h
+index 36a17f3..cf90609 100644
+--- a/lsl/Allocator.h
++++ b/lsl/Allocator.h
+@@ -41,7 +41,7 @@
+ 
+ 
+ #if !TARGET_OS_EXCLAVEKIT
+-#include <_simple.h>
++//#include <_simple.h>
+ #include <mach/vm_statistics.h>
+ #include <os/lock.h>
+ #include <pthread.h>
+diff --git a/mach_o/Error.cpp b/mach_o/Error.cpp
+index bbd4b65..30e53f7 100644
+--- a/mach_o/Error.cpp
++++ b/mach_o/Error.cpp
+@@ -29,7 +29,70 @@
+ #include <errno.h>
+ #include <TargetConditionals.h>
+ #if !TARGET_OS_EXCLAVEKIT
+-  #include <_simple.h>
++  #if __has_include(<_simple.h>)
++    #include <_simple.h>
++  #else
++    // Public SDK shims for _simple.h functions
++    #include <stdlib.h>
++    #include <string.h>
++    #include <cstdarg>
++
++    struct _simple_string_buf {
++        char* str;
++        size_t len;
++        size_t cap;
++    };
++
++    static inline void* _simple_salloc(void) {
++        _simple_string_buf* buf = (_simple_string_buf*)calloc(1, sizeof(_simple_string_buf));
++        if (!buf) return nullptr;
++        buf->cap = 256;
++        buf->str = (char*)malloc(buf->cap);
++        if (!buf->str) { free(buf); return nullptr; }
++        buf->str[0] = '\0';
++        buf->len = 0;
++        return buf;
++    }
++
++    static inline void _simple_sfree(void* ptr) {
++        _simple_string_buf* buf = (_simple_string_buf*)ptr;
++        if (buf) {
++            free(buf->str);
++            free(buf);
++        }
++    }
++
++    static inline const char* _simple_string(void* ptr) {
++        _simple_string_buf* buf = (_simple_string_buf*)ptr;
++        return buf ? buf->str : "";
++    }
++
++    static inline int _simple_vsprintf(void* ptr, const char* fmt, va_list args) {
++        _simple_string_buf* buf = (_simple_string_buf*)ptr;
++        if (!buf || !buf->str) return -1;
++        va_list args_copy;
++        va_copy(args_copy, args);
++        int needed = vsnprintf(NULL, 0, fmt, args_copy);
++        va_end(args_copy);
++        if (needed < 0) return needed;
++
++        size_t new_len = buf->len + needed + 1;
++        if (new_len > buf->cap) {
++            buf->cap = new_len * 2;
++            char* new_str = (char*)realloc(buf->str, buf->cap);
++            if (!new_str) return -1;  // realloc failed, original buf->str still valid
++            buf->str = new_str;
++        }
++        vsnprintf(buf->str + buf->len, buf->cap - buf->len, fmt, args);
++        buf->len += needed;
++        return needed;
++    }
++
++    static inline void _simple_sresize(void* ptr) {
++        _simple_string_buf* buf = (_simple_string_buf*)ptr;
++        if (buf && buf->str) buf->len = strlen(buf->str);
++    }
++  #endif
+ #endif // !TARGET_OS_EXCLAVEKIT
+ 
+ #include <mach/machine.h>
+diff --git a/mach_o/Image.cpp b/mach_o/Image.cpp
+index f0179fe..bf9bd65 100644
+--- a/mach_o/Image.cpp
++++ b/mach_o/Image.cpp
+@@ -33,7 +33,9 @@
+ #include <TargetConditionals.h>
+ #if !TARGET_OS_EXCLAVEKIT
+   #include <mach-o/reloc.h>
+-  #include <libc_private.h>
++  #if __has_include(<libc_private.h>)
++    #include <libc_private.h>
++  #endif
+ #endif // !TARGET_OS_EXCLAVEKIT
+ 
+ #include "Image.h"
+diff --git a/mach_o/LinkerOptimizationHints.cpp b/mach_o/LinkerOptimizationHints.cpp
+index f18535f..ed11d2b 100644
+--- a/mach_o/LinkerOptimizationHints.cpp
++++ b/mach_o/LinkerOptimizationHints.cpp
+@@ -121,8 +121,8 @@ static Error validFPAC(const char* name, std::span<const uint64_t> addrs,
+ 
+ Error LinkerOptimizationHints::valid(std::span<const MappedSegment> segments, uint64_t loadAddress) const
+ {
+-
+-    return std::move(lohErr);
++    // TODO: Validation logic was incomplete in original source (lohErr undefined)
++    return Error::none();
+ }
+ 
+ } // namespace mach_o
+diff --git a/other-tools/SymbolicatedImage.cpp b/other-tools/SymbolicatedImage.cpp
+index 47f1bdb..10ab22b 100644
+--- a/other-tools/SymbolicatedImage.cpp
++++ b/other-tools/SymbolicatedImage.cpp
+@@ -25,7 +25,12 @@
+ #include "SymbolicatedImage.h"
+ 
+ // OS
+-#include <SoftLinking/WeakLinking.h>
++#if __has_include(<SoftLinking/WeakLinking.h>)
++  #include <SoftLinking/WeakLinking.h>
++#else
++  // Public SDK stub - WEAK_LINK_FORCE_IMPORT not available
++  #define WEAK_LINK_FORCE_IMPORT(x)
++#endif
+ 
+ // mach-o
+ #include "Instructions.h"
+diff --git a/other-tools/dsc_extractor.cpp b/other-tools/dsc_extractor.cpp
+index 86e7526..b3e50c1 100644
+--- a/other-tools/dsc_extractor.cpp
++++ b/other-tools/dsc_extractor.cpp
+@@ -44,7 +44,26 @@
+ #include "CodeSigningTypes.h"
+ #include <CommonCrypto/CommonHMAC.h>
+ #include <CommonCrypto/CommonDigest.h>
+-#include <CommonCrypto/CommonDigestSPI.h>
++#if __has_include(<CommonCrypto/CommonDigestSPI.h>)
++  #include <CommonCrypto/CommonDigestSPI.h>
++#else
++  // Public SDK shims for CommonDigestSPI.h
++  enum {
++      kCCDigestNone = 0,
++      kCCDigestSHA1 = 8,
++      kCCDigestSHA256 = 12
++  };
++  static inline int CCDigest(uint32_t algorithm, const void* data, size_t dataLen, void* output) {
++      if (algorithm == kCCDigestSHA1) {
++          CC_SHA1(data, (CC_LONG)dataLen, (unsigned char*)output);
++          return 0;
++      } else if (algorithm == kCCDigestSHA256) {
++          CC_SHA256(data, (CC_LONG)dataLen, (unsigned char*)output);
++          return 0;
++      }
++      return -1;
++  }
++#endif
+ 
+ #define NO_ULEB
+ #include "Architectures.hpp"
+diff --git a/other-tools/dyld_info.cpp b/other-tools/dyld_info.cpp
+index 1614280..3ff125d 100644
+--- a/other-tools/dyld_info.cpp
++++ b/other-tools/dyld_info.cpp
+@@ -34,7 +34,8 @@
+ #include <uuid/uuid.h>
+ #include <mach-o/dyld_introspection.h>
+ #include <mach-o/dyld_priv.h>
+-#include <SoftLinking/WeakLinking.h>
++// FIXME: SoftLinking/WeakLinking.h requires internal SDK
++// #include <SoftLinking/WeakLinking.h>
+ 
+ // STL
+ #include <vector>
+@@ -276,7 +277,8 @@ static void printInitializers(const Image& image)
+ 
+     // print +load methods
+     // TODO: rdar://122190141 (Enable +load initializers in dyld_info)
+-#if !INTERNAL_BUILD
++    // FIXME: Disabled temporarily for public SDK build
++#if 0 // !INTERNAL_BUILD
+     if ( image.header()->hasObjC() ) {
+         const SymbolicatedImage* symImagePtr = &symImage; // for no copy in block...
+         symImage.forEachDefinedObjCClass(^(uint64_t classVmAddr) {
+@@ -932,7 +934,8 @@ static void dumpHex(SymbolicatedImage& symImage, const Header::SectionInfo& sect
+ 
+ static void disassembleSection(SymbolicatedImage& symImage, const Header::SectionInfo& sectInfo, size_t sectNum)
+ {
+-#if HAVE_LIBLTO
++    // FIXME: LLVM disassembler requires internal SDK and liblto
++#if 0 // HAVE_LIBLTO
+     symImage.loadDisassembler();
+     if ( symImage.llvmRef() != nullptr ) {
+         LLVMDisasmContextRef llvmThumbRef = symImage.llvmThumbRef();
+diff --git a/other-tools/dyld_shared_cache_util.cpp b/other-tools/dyld_shared_cache_util.cpp
+index 325c7bc..e2d1e99 100644
+--- a/other-tools/dyld_shared_cache_util.cpp
++++ b/other-tools/dyld_shared_cache_util.cpp
+@@ -57,22 +57,113 @@
+ #include "dsc_extractor.h"
+ #include "dyld_introspection.h"
+ #include "OptimizerObjC.h"
+-#include "OptimizerSwift.h"
++// FIXME: OptimizerSwift.h requires internal SDK - commenting out for public SDK build
++// #include "OptimizerSwift.h"
+ 
+ #include "PrebuiltLoader.h"
+ #include "DyldProcessConfig.h"
+ #include "DyldRuntimeState.h"
+ #include "Utilities.h"
+ 
+-#include "objc-shared-cache.h"
++// FIXME: objc-shared-cache.h requires internal SDK - commenting out for public SDK build
++// #include "objc-shared-cache.h"
+ #include "OptimizerObjC.h"
+ 
+-#include "ObjCVisitor.h"
+-#include "SymbolicatedImage.h"
++// Define HAVE_OBJC_VISITOR based on whether internal SDK headers are available
++#if __has_include("objc-shared-cache.h")
++  #define HAVE_OBJC_VISITOR 1
++  #include "ObjCVisitor.h"
++  #include "SymbolicatedImage.h"
++#else
++  #define HAVE_OBJC_VISITOR 0
++  // Stub types to allow compilation - ObjC functionality will be disabled
++  namespace objc_visitor {
++    struct Visitor {
++      Visitor(const DyldSharedCache*, const dyld3::MachOAnalyzer*, VMAddress) {}
++      Visitor(const DyldSharedCache*, const dyld3::MachOAnalyzer*, std::nullopt_t) {}
++      template<typename F> void forEachClassAndMetaClass(F) const {}
++      template<typename F> void forEachCategory(F) const {}
++      template<typename F> void forEachProtocol(F) const {}
++      template<typename F> void forEachSelectorReference(F) const {}
++    };
++    struct Class {
++      bool isMetaClass = false;
++      VMAddress getVMAddress() const { return VMAddress(0); }
++      VMAddress getNameVMAddr(const Visitor&) const { return VMAddress(0); }
++      template<typename T> T getBaseMethods(const Visitor&) const { return T(); }
++      template<typename T> T getBaseProtocols(const Visitor&) const { return T(); }
++      template<typename T> T getBaseProperties(const Visitor&) const { return T(); }
++      template<typename T> T getIVars(const Visitor&) const { return T(); }
++      std::optional<metadata_visitor::ResolvedValue> getSuperclass(const Visitor&) const { return std::nullopt; }
++    };
++    struct Category {
++      VMAddress getVMAddress() const { return VMAddress(0); }
++      VMAddress getNameVMAddr(const Visitor&) const { return VMAddress(0); }
++      template<typename T> T getInstanceMethods(const Visitor&) const { return T(); }
++      template<typename T> T getClassMethods(const Visitor&) const { return T(); }
++      template<typename T> T getProtocols(const Visitor&) const { return T(); }
++      template<typename T> T getInstanceProperties(const Visitor&) const { return T(); }
++      template<typename T> T getClassProperties(const Visitor&) const { return T(); }
++      std::optional<metadata_visitor::ResolvedValue> getCls(const Visitor&) const { return std::nullopt; }
++    };
++    struct Method {
++      const char* getName(const Visitor&) const { return ""; }
++      const char* getTypes(const Visitor&) const { return ""; }
++      VMAddress getIMPVMAddr(const Visitor&) const { return VMAddress(0); }
++    };
++    struct MethodList {
++      MethodList() = default;
++      MethodList(metadata_visitor::ResolvedValue) {}
++      uint32_t numMethods() const { return 0; }
++      Method getMethod(const Visitor&, uint32_t) const { return Method(); }
++    };
++    struct Protocol {
++      VMAddress getVMAddress() const { return VMAddress(0); }
++      const char* getName(const Visitor&) const { return ""; }
++      template<typename T> T getProtocols(const Visitor&) const { return T(); }
++      template<typename T> T getInstanceMethods(const Visitor&) const { return T(); }
++      template<typename T> T getClassMethods(const Visitor&) const { return T(); }
++      template<typename T> T getOptionalInstanceMethods(const Visitor&) const { return T(); }
++      template<typename T> T getOptionalClassMethods(const Visitor&) const { return T(); }
++    };
++    struct ProtocolList {
++      ProtocolList() = default;
++      ProtocolList(metadata_visitor::ResolvedValue) {}
++      uint32_t numProtocols(const Visitor&) const { return 0; }
++      Protocol getProtocol(const Visitor&, uint32_t) const { return Protocol(); }
++    };
++    struct Property {
++      const char* getName(const Visitor&) const { return ""; }
++      const char* getAttributes(const Visitor&) const { return ""; }
++    };
++    struct PropertyList {
++      PropertyList() = default;
++      PropertyList(metadata_visitor::ResolvedValue) {}
++      uint32_t numProperties() const { return 0; }
++      Property getProperty(const Visitor&, uint32_t) const { return Property(); }
++    };
++    struct IVar {
++      const char* getName(const Visitor&) const { return ""; }
++      const char* getType(const Visitor&) const { return ""; }
++      uint32_t getOffset(const Visitor&) const { return 0; }
++    };
++    struct IVarList {
++      uint32_t numIVars() const { return 0; }
++      IVar getIVar(const Visitor&, uint32_t) const { return IVar(); }
++    };
++  }
++  namespace metadata_visitor {
++    struct ResolvedValue {
++      VMAddress vmAddress() const { return VMAddress(0); }
++      void* value() const { return nullptr; }
++    };
++  }
++#endif
+ 
+ using namespace dyld4;
+ 
+-using other_tools::SymbolicatedImage;
++// FIXME: SymbolicatedImage requires internal SDK
++// using other_tools::SymbolicatedImage;
+ using mach_o::Header;
+ using mach_o::Platform;
+ using mach_o::Version32;
+@@ -202,6 +293,8 @@ static void checkMode(Mode mode) {
+     }
+ }
+ 
++// FIXME: SymbolicatedCache requires internal SDK (SymbolicatedImage) - commenting out
++#if 0
+ struct SymbolicatedCache
+ {
+     struct Range
+@@ -322,6 +415,7 @@ SymbolicatedImage::SymbolLoc SymbolicatedCache::findClosestSymbol(uint64_t addr,
+     }
+     return loc;
+ }
++#endif // SymbolicatedCache disabled
+ 
+ 
+ struct SegmentInfo
+@@ -839,6 +933,8 @@ static bool findImageAndSegment(const DyldSharedCache* dyldCache, const std::vec
+     return true;
+ }
+ 
++// FIXME: dumpObjCClassLayout requires ObjCVisitor.h from internal SDK - commenting out
++#if 0
+ static void dumpObjCClassLayout(const DyldSharedCache* dyldCache)
+ {
+     dyldCache->forEachImage(^(const Header *hdr, const char *installName) {
+@@ -879,7 +975,15 @@ static void dumpObjCClassLayout(const DyldSharedCache* dyldCache)
+         });
+     });
+ }
++#endif // dumpObjCClassLayout disabled
+ 
++// skipListsOfLists - when HAVE_OBJC_VISITOR is 0, just return the list unchanged
++#if !HAVE_OBJC_VISITOR
++template<typename ListTy>
++static ListTy skipListsOfLists(ListTy&& list, const objc_visitor::Visitor&) {
++    return std::forward<ListTy>(list);
++}
++#else
+ template<typename ListTy>
+ static ListTy skipListsOfLists(ListTy&& list, const objc_visitor::Visitor& visitor)
+ {
+@@ -910,7 +1014,10 @@ static ListTy skipListsOfLists(ListTy&& list, const objc_visitor::Visitor& visit
+ 
+     return list;
+ }
++#endif // HAVE_OBJC_VISITOR
+ 
++// FIXME: dumpObjCClassMethodLists requires ObjCVisitor.h from internal SDK - commenting out
++#if 0
+ static void dumpObjCClassMethodLists(const DyldSharedCache* dyldCache)
+ {
+     // Map from vmAddr to the category name for that address
+@@ -1246,6 +1353,7 @@ static void dumpObjCClassMethodLists(const DyldSharedCache* dyldCache)
+     if ( badCategory )
+         exit(1);
+ }
++#endif // dumpObjCClassMethodLists disabled
+ 
+ static bool patchKindIsRootOptimized(PatchKind patchKind)
+ {
+@@ -2057,7 +2165,9 @@ int main (int argc, const char* argv[]) {
+             printf("%lld %s\n", keyAndValue.second, keyAndValue.first.c_str());
+         }
+     }
++    // FIXME: modeObjCInfo requires objc-shared-cache.h from internal SDK
+     else if ( options.mode == modeObjCInfo ) {
++#if 0
+         if ( !dyldCache->hasOptimizedObjC() ) {
+             fprintf(stderr, "Error: could not get optimized objc\n");
+             return 1;
+@@ -2154,8 +2264,13 @@ int main (int argc, const char* argv[]) {
+                    i, objcDylib.second->version, objcDylib.second->flags,
+                    flagsStr.c_str(), objcDylib.first.data());
+         }
++#endif // modeObjCInfo disabled
++        fprintf(stderr, "Error: modeObjCInfo requires internal SDK (objc-shared-cache.h)\n");
++        return 1;
+     }
++    // FIXME: modeObjCProtocols requires objc-shared-cache.h from internal SDK
+     else if ( options.mode == modeObjCProtocols ) {
++#if 0
+         if ( !dyldCache->hasOptimizedObjC() ) {
+             fprintf(stderr, "Error: could not get optimized objc\n");
+             return 1;
+@@ -2224,8 +2339,13 @@ int main (int argc, const char* argv[]) {
+                        dylibMap.at(objectInfo.second));
+             }
+         });
++#endif // modeObjCProtocols disabled
++        fprintf(stderr, "Error: modeObjCProtocols requires internal SDK (objc-shared-cache.h)\n");
++        return 1;
+     }
++    // FIXME: modeObjCClassHashTable requires objc-shared-cache.h from internal SDK
+     else if ( options.mode == modeObjCClassHashTable ) {
++#if 0
+         if ( !dyldCache->hasOptimizedObjC() ) {
+             fprintf(stderr, "Error: could not get optimized objc\n");
+             return 1;
+@@ -2259,6 +2379,9 @@ int main (int argc, const char* argv[]) {
+                        bucketIndex, objectInfo.first, objectInfo.second, className);
+             }
+         });
++#endif // modeObjCClassHashTable disabled
++        fprintf(stderr, "Error: modeObjCClassHashTable requires internal SDK (objc-shared-cache.h)\n");
++        return 1;
+     }
+     else if ( options.mode == modeObjCClasses ) {
+ 
+@@ -2866,13 +2989,27 @@ int main (int argc, const char* argv[]) {
+ 
+         json::streamArrayEnd(needsComma);
+     }
++    // FIXME: modeObjCClassLayout requires ObjCVisitor.h from internal SDK
+     else if ( options.mode == modeObjCClassLayout ) {
++#if 0
+         dumpObjCClassLayout(dyldCache);
++#else
++        fprintf(stderr, "Error: modeObjCClassLayout requires internal SDK (ObjCVisitor.h)\n");
++        return 1;
++#endif
+     }
++    // FIXME: modeObjCClassMethodLists requires ObjCVisitor.h from internal SDK
+     else if ( options.mode == modeObjCClassMethodLists ) {
++#if 0
+         dumpObjCClassMethodLists(dyldCache);
++#else
++        fprintf(stderr, "Error: modeObjCClassMethodLists requires internal SDK (ObjCVisitor.h)\n");
++        return 1;
++#endif
+     }
++    // FIXME: modeObjCSelectors requires objc-shared-cache.h from internal SDK
+     else if ( options.mode == modeObjCSelectors ) {
++#if 0
+         if ( !dyldCache->hasOptimizedObjC() ) {
+             fprintf(stderr, "Error: could not get optimized objc\n");
+             return 1;
+@@ -2904,7 +3041,11 @@ int main (int argc, const char* argv[]) {
+         }
+ 
+         json::printJSON(root, 0, std::cout);
++#endif // modeObjCSelectors disabled
++        fprintf(stderr, "Error: modeObjCSelectors requires internal SDK (objc-shared-cache.h)\n");
++        return 1;
+     }
++    // FIXME: modeSwiftProtocolConformances requires OptimizerSwift.h from internal SDK
+     else if ( options.mode == modeSwiftProtocolConformances ) {
+ #if 0
+         // This would dump the conformances in each binary, not the table in the shared cache
+@@ -2924,6 +3065,7 @@ int main (int argc, const char* argv[]) {
+         });
+ #endif
+ 
++#if __has_include("OptimizerSwift.h")
+         auto getLibraryLeafName = [](const char* path)
+         {
+             const char* start = strrchr(path, '/');
+@@ -3180,8 +3322,14 @@ int main (int argc, const char* argv[]) {
+         } else {
+             printf("Unhandled version\n");
+         }
++#else
++        fprintf(stderr, "Error: modeSwiftProtocolConformances requires internal SDK (OptimizerSwift.h)\n");
++        return 1;
++#endif
+     }
++    // FIXME: modeSwiftPtrTables requires OptimizerSwift.h from internal SDK
+     else if ( options.mode == modeSwiftPtrTables ) {
++#if 0
+         uint64_t cacheBaseAddr = dyldCache->unslidLoadAddress();
+         const SwiftOptimizationHeader* swiftOptHeader = dyldCache->swiftOpt();
+         if ( swiftOptHeader == nullptr ) {
+@@ -3215,8 +3363,14 @@ int main (int argc, const char* argv[]) {
+         } else {
+             printf("Unhandled version\n");
+         }
++#else
++        fprintf(stderr, "Error: modeSwiftPtrTables requires internal SDK (OptimizerSwift.h and SymbolicatedImage.h)\n");
++        return 1;
++#endif
+     }
++    // FIXME: modeLookupVA requires SymbolicatedImage.h from internal SDK
+     else if ( options.mode == modeLookupVA ) {
++#if 0
+         CString vaString = options.lookupVA;
+ 
+         SymbolicatedCache symbolicatedCache(dyldCache, cacheOnDisk);
+@@ -3253,6 +3407,10 @@ int main (int argc, const char* argv[]) {
+             printf("  %15s 0x%llx - 0x%llx\n", "range:", range.startAddr, range.endAddr);
+             printf("  %15s %s\n", "symbol:", symbolicatedCache.symbolNameAt(addr).c_str());
+         }
++#else
++        fprintf(stderr, "Error: modeLookupVA requires internal SDK (SymbolicatedImage.h)\n");
++        return 1;
++#endif
+     }
+     else if ( options.mode == modeExtract ) {
+         return dyld_shared_cache_extract_dylibs(sharedCachePath, options.extractionDir);

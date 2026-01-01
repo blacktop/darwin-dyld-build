@@ -1,0 +1,25 @@
+# Build directories
+build/
+dist/
+release/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# Xcode
+*.xcworkspace
+xcuserdata/
+DerivedData/
+*.xcodeproj/project.xcworkspace/
+*.xcodeproj/xcuserdata/
+
+# IDE
+.idea/
+.vscode/
+*.sublime-*
+
+# Temporary files
+*.tmp
+*.log

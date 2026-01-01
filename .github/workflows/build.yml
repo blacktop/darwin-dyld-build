@@ -55,7 +55,7 @@ jobs:
           cd ..
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: dyld-tools-universal
           path: dyld-tools-universal.tar.gz

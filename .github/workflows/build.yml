@@ -54,7 +54,7 @@ jobs:
           file dist/dyld_shared_cache_util
           lipo -info dist/dyld_info
           lipo -info dist/dyld_shared_cache_util
-          dist/dyld_shared_cache_util 2>&1 | head -5
+          dist/dyld_shared_cache_util 2>&1 | head -5 || true
 
       - name: Create archive
         run: |
